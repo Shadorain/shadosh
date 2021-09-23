@@ -1,0 +1,9 @@
+[package]
+name = "rust-shell"
+version = "0.1.0"
+edition = "2018"
+author = "Shadorain"
+
+[dependencies]
+home = "0.5.3"
+debug_print = "1.0.0"
