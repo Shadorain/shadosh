@@ -1,4 +1,4 @@
-use std::{env, fs::File, io::{prelude::*, self, Write}, iter::Peekable, path::Path, str::FromStr};
+use std::{env, fs::File, io::{prelude::*, self, Write}, path::Path, str::FromStr};
 use std::process::{Child, Command, Stdio};
 use debug_print::debug_println;
 
@@ -12,12 +12,23 @@ struct Cmd {
     line: String,
     keyword: String, 
     args: Vec<String>,
-    prev_cmd: Option<Child>, 
 }
 
 #[derive(Debug)]
 struct Cmds {
+    line: String,
     splits: Vec<Cmd>,
+}
+
+impl Cmd {
+    pub fn new (c: &str) -> Cmd {
+        let mut cmd_split: Vec<String> = c.trim().split_whitespace().map(|s| s.to_string()).collect();
+        Cmd {
+            line: c.to_string(),
+            keyword: cmd_split.remove(0),
+            args: cmd_split,
+        }
+    }
 }
 // Builtins {{{
 enum Builtin {
@@ -83,22 +94,28 @@ impl FromStr for Builtin {
     }
 }
 // }}}
-fn process_cmd (c: Cmd) -> ErrCode {
+fn process_cmd (c: Cmd, some: bool, mut previous_cmd: Option<Child>) -> (ErrCode, Option<Child>) {
+    let mut exit_sts = ErrCode::Success;
     match Builtin::from_str(&c.keyword) {
-        Ok(Builtin::Echo) => builtin_echo(&c.args),
-        Ok(Builtin::History) => builtin_history(&c.args),
-        Ok(Builtin::Cd) => builtin_cd(&c.args),
-        Ok(Builtin::Pwd) => builtin_pwd(&c.args),
+        Ok(Builtin::Echo) => (builtin_echo(&c.args), None),
+        Ok(Builtin::History) => (builtin_history(&c.args), None),
+        Ok(Builtin::Cd) => (builtin_cd(&c.args), None),
+        Ok(Builtin::Pwd) => (builtin_pwd(&c.args), None),
         _ => { 
-            let mut parts = c.line.trim().split_whitespace();
-            let command = parts.next().unwrap();
-            let args = parts;
-            let child = Command::new(command).args(args).spawn();
-            match child {
-                Ok(mut child) => { child.wait().ok(); },
-                Err(e) => { eprintln!("{}", e); return ErrCode::Error },
-            };
-            ErrCode::Success
+            println!("TEST: {}", c.keyword);
+            let stdin = previous_cmd.map_or(Stdio::inherit(),
+                |output: Child| Stdio::from(output.stdout.unwrap()));
+            let stdout = if !some { Stdio::piped() } else { Stdio::inherit() };
+
+            let output = Command::new(c.keyword).args(&c.args).stdin(stdin)
+                .stdout(stdout).spawn();
+            match output {
+                Ok(output) => { previous_cmd = Some(output); },
+                Err(e) => { previous_cmd = None; eprintln!("{}", e); exit_sts = ErrCode::Error; },
+            }
+            debug_println!("DEBUG (Previous): {:?}", previous_cmd);
+            println!("Prev: {:?}", previous_cmd);
+            (exit_sts, previous_cmd)
         }
         // _ => { println!("{}: command not found", &c.keyword); ErrCode::Error },
     }
@@ -119,57 +136,34 @@ fn read_command () -> String {
     command
 }
 
-fn tokenize_commands (c: String) -> Cmds {
+fn tokenize_commands (c: &str) -> Cmds {
     let mut commands = c.trim().split(" | ").peekable();
 
     let mut v: Vec<Cmd> = Vec::new();
     while let Some(command) = commands.next() {
-        v.push(Cmd::new(command.to_string()));
+        v.push(Cmd::new(command));
     }
-
-    debug_println!("DEBUG (Split Commands): {:?}", v);
-    Cmds { splits: v }
+    Cmds { line: c.to_string(), splits: v }
 }
 
-// fn tokenize_command (c: String) -> Cmd {
-//     let mut cmd_split: Vec<String> = c.trim().split_whitespace().map(|s| s.to_string()).collect();
-//     debug_println!("DEBUG (Split Input): {:?}", cmd_split);
-//     println!("c: {}", c);
-
-//     let cmd = Cmd {
-//         line: c,
-//         keyword: cmd_split.remove(0),
-//         args: cmd_split,
-//     };
-//     debug_println!("DEBUG (Keyword): {:?}", cmd.keyword);
-//     debug_println!("DEBUG (Num of Args): {0:?}\nDEBUG (Args): {1:?}", cmd.args.len(), cmd.args);
-//     cmd
-// }
-
-impl Cmd {
-    pub fn new (c: String) -> Cmd {
-        let mut cmd_split: Vec<String> = c.trim().split_whitespace().map(|s| s.to_string()).collect();
-        Cmd {
-            line: c,
-            keyword: cmd_split.remove(0),
-            args: cmd_split,
-            prev_cmd: None,
-        }
-    }
-}
 
 fn main () {
     loop {
         print_prompt();
-        let command = read_command();
-        if command == "\n" { continue; }
-        if command == "exit\n" { return; }
+        let ln = read_command();
+        if ln == "\n" { continue; }
+        if ln == "exit\n" { return; }
         
         /* TODO: Add history save */
 
-        let cmds = tokenize_commands(command);
-        // let cmds = tokenize_command(command);
-        // process_cmd(cmds);
+        let cmds = tokenize_commands(&ln);
+        let mut ret = (ErrCode::Success, None);
+        for (i, cmd) in cmds.splits.into_iter().enumerate() {
+            ret = process_cmd(cmd, true, /*if i != 0 {true} else {false},*/ ret.1);
+        };
+        if let Some(mut final_command) = ret.1 {
+            final_command.wait().ok();
+        }
     }
 }
 // Tests {{{
